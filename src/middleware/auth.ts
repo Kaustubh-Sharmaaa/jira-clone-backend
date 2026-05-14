@@ -22,12 +22,21 @@ export function verifyToken(req: Request, res: Response, next: NextFunction): vo
   }
 }
 
-export function requireRoles(...roles: Role[]) {
+/**
+ * RBAC middleware factory.
+ * Usage: createRoleGuard('OWNER', 'ADMIN')
+ * Roles are ranked: OWNER > ADMIN > MEMBER > VIEWER
+ * A request passes if the user's role is in the allowed list.
+ */
+export function createRoleGuard(...allowedRoles: Role[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (!roles.includes(req.userRole)) {
+    if (!allowedRoles.includes(req.userRole)) {
       error(res, 'Insufficient permissions', 403);
       return;
     }
     next();
   };
 }
+
+// Alias for backwards compatibility
+export const requireRoles = createRoleGuard;
