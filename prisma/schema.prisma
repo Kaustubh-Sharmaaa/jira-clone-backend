@@ -50,6 +50,7 @@ model Tenant {
   tasks               Task[]
   invitations         Invitation[]
   passwordResetTokens PasswordResetToken[]
+  projectMembers      ProjectMember[]
 }
 
 model User {
@@ -67,6 +68,7 @@ model User {
   tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  projectMembers      ProjectMember[]
   assignedTasks       Task[]               @relation("TaskAssignee")
   reportedTasks       Task[]               @relation("TaskReporter")
   comments            Comment[]
@@ -133,12 +135,31 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant  Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tasks   Task[]
   sprints Sprint[]
+  members ProjectMember[]
 
   @@unique([key, tenantId])
   @@index([tenantId])
+}
+
+model ProjectMember {
+  id        String   @id @default(uuid())
+  projectId String
+  userId    String
+  tenantId  String
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([tenantId])
+  @@index([projectId])
+  @@index([userId])
 }
 
 model Task {
