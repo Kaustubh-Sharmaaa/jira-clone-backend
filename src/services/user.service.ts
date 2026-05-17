@@ -114,8 +114,8 @@ export async function acceptInvite(input: AcceptInviteInput) {
   });
   if (alreadyInTenant) throw new Error('USER_ALREADY_EXISTS');
 
-  // For new users, name is required
-  if (!invitation.isExistingUser && !name) throw new Error('NAME_REQUIRED');
+  // For new users, name is required (guard against empty string too)
+  if (!invitation.isExistingUser && !name?.trim()) throw new Error('NAME_REQUIRED');
 
   // For existing users, fall back to their name in another tenant
   let resolvedName = name;
