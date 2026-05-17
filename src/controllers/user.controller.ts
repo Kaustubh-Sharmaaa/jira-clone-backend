@@ -5,6 +5,7 @@ import { issueTokenPair } from '../services/auth.service';
 import {
   inviteUser,
   acceptInvite,
+  checkInvite,
   listUsers,
   changeUserRole,
   deactivateUser,
@@ -21,7 +22,7 @@ const inviteSchema = z.object({
 
 const acceptInviteSchema = z.object({
   token: z.string().min(1),
-  name: z.string().min(1).max(100),
+  name: z.string().min(1).max(100).optional(), // required for new users, auto-resolved for existing
   password: z.string().min(8),
 });
 
@@ -52,7 +53,7 @@ export async function invite(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const { invitation, rawToken } = await inviteUser({
+    const { invitation, rawToken, isExistingUser, existingName } = await inviteUser({
       email,
       role,
       tenantId: req.tenantId,
@@ -65,6 +66,7 @@ export async function invite(req: Request, res: Response): Promise<void> {
         id: invitation.id,
         email: invitation.email,
         role: invitation.role,
+        isExistingUser,
         expiresAt: invitation.expiresAt,
       },
     };
@@ -85,6 +87,25 @@ export async function invite(req: Request, res: Response): Promise<void> {
 }
 
 /**
+ * GET /api/users/check-invite/:token — public
+ * Returns invite metadata so the frontend knows which form to show.
+ */
+export async function checkInviteHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const data = await checkInvite(String(req.params.token));
+    success(res, data);
+  } catch (err) {
+    if (err instanceof Error) {
+      const msg = err.message;
+      if (msg === 'INVALID_TOKEN') return void error(res, 'Invite token is invalid', 400);
+      if (msg === 'INVITE_ALREADY_USED') return void error(res, 'Invite has already been used', 400);
+      if (msg === 'INVITE_EXPIRED') return void error(res, 'Invite has expired', 400);
+    }
+    error(res, 'Internal server error', 500);
+  }
+}
+
+/**
  * POST /api/users/accept-invite — public
  * User sets their name + password and activates their account.
  */
@@ -96,7 +117,7 @@ export async function acceptInviteHandler(req: Request, res: Response): Promise<
   }
 
   try {
-    const { user, tenant } = await acceptInvite(parsed.data);
+    const { user, tenant, isExistingUser } = await acceptInvite(parsed.data);
     const { accessToken, refreshToken } = await issueTokenPair({
       ...user,
       tenantSlug: tenant!.slug,
@@ -110,6 +131,7 @@ export async function acceptInviteHandler(req: Request, res: Response): Promise<
         role: user.role,
         tenantId: user.tenantId,
         tenantSlug: tenant!.slug,
+        isExistingUser,
       },
       tokens: { accessToken, refreshToken },
     });
@@ -119,7 +141,8 @@ export async function acceptInviteHandler(req: Request, res: Response): Promise<
       if (msg === 'INVALID_TOKEN') return void error(res, 'Invite token is invalid', 400);
       if (msg === 'INVITE_ALREADY_USED') return void error(res, 'Invite has already been used', 400);
       if (msg === 'INVITE_EXPIRED') return void error(res, 'Invite has expired', 400);
-      if (msg === 'USER_ALREADY_EXISTS') return void error(res, 'Account already exists', 409);
+      if (msg === 'USER_ALREADY_EXISTS') return void error(res, 'Account already exists in this workspace', 409);
+      if (msg === 'NAME_REQUIRED') return void error(res, 'Name is required for new users', 400);
     }
     error(res, 'Internal server error', 500);
   }

@@ -4,6 +4,7 @@ import { authRateLimiter } from '../middleware/rateLimiter';
 import {
   invite,
   acceptInviteHandler,
+  checkInviteHandler,
   getUsers,
   updateRole,
   deactivate,
@@ -12,6 +13,7 @@ import {
 const router = Router();
 
 // ─── Public ───────────────────────────────────────────────────────────────────
+router.get('/check-invite/:token', authRateLimiter, checkInviteHandler);
 router.post('/accept-invite', authRateLimiter, acceptInviteHandler);
 
 // ─── Protected — OWNER or ADMIN only ─────────────────────────────────────────

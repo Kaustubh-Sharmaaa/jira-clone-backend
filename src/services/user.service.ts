@@ -30,53 +30,102 @@ export interface InviteUserInput {
  * - Only one active (non-accepted, non-expired) invite per email per tenant.
  * - Returns the raw token (to be sent via email; logged to console in dev).
  */
+/**
+ * Creates a pending invitation for a user.
+ * - Detects if the email already exists in the system (another tenant).
+ * - isExistingUser=true tells the frontend to show a simpler accept form (no name needed).
+ * - Invalidates any previous pending invite for this email in this tenant.
+ */
 export async function inviteUser(input: InviteUserInput) {
   const { email, role, tenantId } = input;
 
-  // Check if user already exists in this tenant
-  const existingUser = await prisma.user.findUnique({
+  // Check if user already exists in THIS tenant
+  const inThisTenant = await prisma.user.findUnique({
     where: { email_tenantId: { email, tenantId } },
   });
-  if (existingUser) throw new Error('USER_ALREADY_EXISTS');
+  if (inThisTenant) throw new Error('USER_ALREADY_EXISTS');
+
+  // Check if user exists in ANY other tenant (for UX hint)
+  const existingAnywhere = await prisma.user.findFirst({
+    where: { email },
+    select: { name: true },
+  });
+  const isExistingUser = !!existingAnywhere;
 
   // Invalidate any previous pending invite for this email in this tenant
   await prisma.invitation.updateMany({
     where: { email, tenantId, accepted: false },
-    data: { expiresAt: new Date() }, // expire immediately
+    data: { expiresAt: new Date() },
   });
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
   const invitation = await prisma.invitation.create({
-    data: { email, role, tenantId, token: rawToken, expiresAt },
+    data: { email, role, tenantId, token: rawToken, expiresAt, isExistingUser },
   });
 
-  return { invitation, rawToken };
+  return { invitation, rawToken, isExistingUser, existingName: existingAnywhere?.name };
+}
+
+/**
+ * Returns invite metadata for the frontend to decide which form to show.
+ * Call this before rendering the accept page.
+ */
+export async function checkInvite(token: string) {
+  const invitation = await prisma.invitation.findUnique({ where: { token } });
+  if (!invitation) throw new Error('INVALID_TOKEN');
+  if (invitation.accepted) throw new Error('INVITE_ALREADY_USED');
+  if (invitation.expiresAt < new Date()) throw new Error('INVITE_EXPIRED');
+
+  // Look up existing user name hint
+  const existing = invitation.isExistingUser
+    ? await prisma.user.findFirst({ where: { email: invitation.email }, select: { name: true } })
+    : null;
+
+  return {
+    email: invitation.email,
+    role: invitation.role,
+    isExistingUser: invitation.isExistingUser,
+    existingName: existing?.name ?? null,
+    expiresAt: invitation.expiresAt,
+  };
 }
 
 // ─── Accept Invite ────────────────────────────────────────────────────────────
 
 export interface AcceptInviteInput {
   token: string;
-  name: string;
   password: string;
+  name?: string; // required for new users, optional for existing (defaults to their existing name)
 }
 
 export async function acceptInvite(input: AcceptInviteInput) {
-  const { token, name, password } = input;
+  const { token, password, name } = input;
 
   const invitation = await prisma.invitation.findUnique({ where: { token } });
-
   if (!invitation) throw new Error('INVALID_TOKEN');
   if (invitation.accepted) throw new Error('INVITE_ALREADY_USED');
   if (invitation.expiresAt < new Date()) throw new Error('INVITE_EXPIRED');
 
-  // Double-check the email isn't already registered (race condition guard)
-  const existingUser = await prisma.user.findUnique({
+  // Race condition guard — already in this tenant?
+  const alreadyInTenant = await prisma.user.findUnique({
     where: { email_tenantId: { email: invitation.email, tenantId: invitation.tenantId } },
   });
-  if (existingUser) throw new Error('USER_ALREADY_EXISTS');
+  if (alreadyInTenant) throw new Error('USER_ALREADY_EXISTS');
+
+  // For new users, name is required
+  if (!invitation.isExistingUser && !name) throw new Error('NAME_REQUIRED');
+
+  // For existing users, fall back to their name in another tenant
+  let resolvedName = name;
+  if (!resolvedName) {
+    const existingUser = await prisma.user.findFirst({
+      where: { email: invitation.email },
+      select: { name: true },
+    });
+    resolvedName = existingUser?.name ?? invitation.email.split('@')[0];
+  }
 
   const passwordHash = await hashPassword(password);
 
@@ -84,7 +133,7 @@ export async function acceptInvite(input: AcceptInviteInput) {
     prisma.user.create({
       data: {
         email: invitation.email,
-        name,
+        name: resolvedName,
         passwordHash,
         role: invitation.role,
         tenantId: invitation.tenantId,
@@ -101,7 +150,7 @@ export async function acceptInvite(input: AcceptInviteInput) {
     select: { id: true, name: true, slug: true, timezone: true },
   });
 
-  return { user, tenant };
+  return { user, tenant, isExistingUser: invitation.isExistingUser };
 }
 
 // ─── List Users ───────────────────────────────────────────────────────────────
