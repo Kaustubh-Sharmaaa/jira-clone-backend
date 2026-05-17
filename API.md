@@ -1,326 +1,364 @@
-# Jira Clone Backend — API Reference & Frontend Integration Guide
+# Jira Clone — API Reference
 
-**Base URL:** `http://localhost:3000/api` (dev) · swap for your production URL  
-**Auth:** `Authorization: Bearer <accessToken>` on all 🔒 routes  
-**Content-Type:** `application/json`
+All routes are prefixed with `/api`. Protected routes require `Authorization: Bearer <accessToken>`.
 
 ---
 
-## Response Envelope
+## 1. Tenants
 
-Every response follows this shape — always check `success` first.
+### `POST /api/tenants/register`
+Bootstrap a new workspace with the first OWNER account.
 
+**Body**
 ```json
-// Success
-{ "success": true, "data": { ... } }
-
-// Error
-{ "success": false, "error": { "code": 401, "message": "..." } }
+{ "tenantName": "Acme Inc", "adminName": "Alice", "adminEmail": "alice@acme.com", "adminPassword": "Password123!" }
+```
+**Response**
+```json
+{
+  "success": true,
+  "data": {
+    "tenant": { "id": "...", "name": "Acme Inc", "slug": "acme-inc" },
+    "admin":  { "id": "...", "email": "alice@acme.com", "role": "OWNER" },
+    "tokens": { "accessToken": "eyJ...", "refreshToken": "eyJ..." }
+  }
+}
 ```
 
 ---
 
-## Token Management
+## 2. Auth
 
-### How tokens work
+All unauthenticated except `/me`, `/change-password`, and `/logout-all`.
 
-| Token | Lifetime | Purpose |
-|---|---|---|
-| `accessToken` | 15 minutes | Sent on every protected API call |
-| `refreshToken` | 7 days | Used once to get a new token pair |
+### `POST /api/auth/register`
+Register a new member in an existing tenant (open registration — use invite flow for controlled access).
 
-### What's inside the access token
+**Body:** `tenantSlug`, `email`, `password`, `name`
 
-Decode it at [jwt.io](https://jwt.io) or with any JWT library — no API call needed:
+### `POST /api/auth/login`
+Authenticate and receive JWT pair.
+
+**Body:** `email`, `password`, `tenantSlug`
+
+**Response**
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "eyJ...",
+    "refreshToken": "eyJ...",
+    "user": { "id": "...", "email": "alice@acme.com", "role": "OWNER", "tenantSlug": "acme-inc" }
+  }
+}
+```
+
+### `GET /api/auth/me` 🔒
+Returns the currently authenticated user with tenant info.
+
+**Response**
+```json
+{
+  "data": { "id": "...", "email": "alice@acme.com", "role": "OWNER",
+            "tenant": { "id": "...", "name": "Acme Inc", "slug": "acme-inc" } }
+}
+```
+
+### `POST /api/auth/refresh`
+Rotate the refresh token and issue a new JWT pair. Old refresh token is invalidated.
+
+**Body:** `refreshToken`
+
+### `POST /api/auth/logout`
+Revoke a single refresh token.
+
+**Body:** `refreshToken`
+
+### `POST /api/auth/logout-all` 🔒
+Revoke all active sessions for the current user.
+
+### `POST /api/auth/forgot-password`
+Generate a password-reset token (logged to console in dev, emailed in prod).
+
+**Body:** `email`, `tenantSlug`
+
+**Response** *(dev only)*
+```json
+{ "data": { "message": "...", "devToken": "abc123..." } }
+```
+
+### `POST /api/auth/reset-password`
+Set a new password using a valid reset token.
+
+**Body:** `token`, `newPassword`
+
+### `POST /api/auth/change-password` 🔒
+Change password for the currently logged-in user.
+
+**Body:** `currentPassword`, `newPassword`
+
+---
+
+## 3. Users & Invitations
+
+> `OWNER` / `ADMIN` required for all write operations.
+
+### `POST /api/users/invite` 🔒 *(ADMIN+)*
+Invite a user by email — creates a pending invitation record. Detects if the email already exists in another workspace and sets `isExistingUser` accordingly.
+
+**Body:** `email`, `role` (`ADMIN | MEMBER | VIEWER`)
+
+**Response**
+```json
+{
+  "data": {
+    "invitation": { "id": "...", "email": "bob@acme.com", "role": "MEMBER", "isExistingUser": false, "expiresAt": "..." },
+    "devToken": "abc123..."
+  }
+}
+```
+
+### `GET /api/users/check-invite/:token`
+Returns invite metadata so the frontend knows which form to show (new user needs name + password; existing user only needs password).
+
+**Response**
+```json
+{
+  "data": { "email": "bob@acme.com", "role": "MEMBER", "isExistingUser": false, "existingName": null, "expiresAt": "..." }
+}
+```
+
+### `POST /api/users/accept-invite`
+Activate an invite. New users must supply `name`; existing users only need `password` (name is resolved from their other tenant). Returns JWT pair so the user is logged in immediately.
+
+**Body:** `token`, `password`, `name` *(required for new users only)*
+
+**Response**
+```json
+{
+  "data": {
+    "user": { "id": "...", "email": "bob@acme.com", "name": "Bob", "role": "MEMBER", "tenantSlug": "acme-inc", "isExistingUser": false },
+    "tokens": { "accessToken": "eyJ...", "refreshToken": "eyJ..." }
+  }
+}
+```
+
+### `GET /api/users` 🔒 *(ADMIN+)*
+List all users in the current tenant.
+
+**Response**
+```json
+{ "data": { "users": [{ "id": "...", "email": "...", "name": "...", "role": "MEMBER", "isActive": true }], "total": 3 } }
+```
+
+### `PATCH /api/users/:id/role` 🔒 *(ADMIN+)*
+Change a user's role. Actor must outrank both the target's current role and the new role.
+
+**Body:** `role`
+
+### `DELETE /api/users/:id` 🔒 *(ADMIN+)*
+Deactivate a user (soft delete). Cannot deactivate yourself.
+
+---
+
+## 4. Projects
+
+> All routes are scoped to the authenticated user's tenant.
+
+### `POST /api/projects` 🔒 *(ADMIN+)*
+Create a project with a globally-unique key prefix used for task keys (e.g. `SHOP`).
+
+**Body:** `name`, `key` *(2–6 uppercase letters, unique per tenant)*, `description?`
+
+**Response**
+```json
+{
+  "data": {
+    "project": { "id": "...", "name": "Shop App", "key": "SHOP", "status": "ACTIVE",
+                 "_count": { "members": 1, "tasks": 0 } }
+  }
+}
+```
+
+### `GET /api/projects` 🔒
+List all active projects for the tenant, including member and task counts.
+
+### `GET /api/projects/:id` 🔒
+Project detail including member list.
+
+### `PATCH /api/projects/:id` 🔒 *(ADMIN+)*
+Update project name, description, or status.
+
+**Body:** `name?`, `description?`, `status?` (`ACTIVE | ON_HOLD | COMPLETED`)
+
+### `DELETE /api/projects/:id` 🔒 *(ADMIN+)*
+Soft-archive a project (`isArchived: true`). Archived projects are excluded from listings.
+
+### `POST /api/projects/:id/members` 🔒 *(ADMIN+)*
+Add a tenant user to the project.
+
+**Body:** `userId`, `role` (`OWNER | ADMIN | MEMBER | VIEWER`)
+
+### `GET /api/projects/:id/members` 🔒
+List all members of a project.
+
+**Response**
+```json
+{ "data": { "members": [{ "userId": "...", "name": "Alice", "email": "...", "role": "OWNER" }], "total": 2 } }
+```
+
+### `DELETE /api/projects/:id/members/:userId` 🔒 *(ADMIN+)*
+Remove a user from the project.
+
+---
+
+## 5. Tasks
+
+> Task keys are auto-generated (`SHOP-1`, `SHOP-2`, ...) and never reused.
+
+### `POST /api/projects/:id/tasks` 🔒
+Create a task in the project.
+
+**Body:** `title` *(required)*, `description?`, `status?`, `priority?`, `assigneeId?`, `dueDate?`, `estimatedHours?`, `labels?`, `parentTaskId?`, `sprintId?`
+
+**Enums:** `status`: `TODO | IN_PROGRESS | IN_REVIEW | DONE | CANCELLED` · `priority`: `LOW | MEDIUM | HIGH | URGENT`
+
+**Response**
+```json
+{
+  "data": {
+    "task": {
+      "id": "...", "taskKey": "SHOP-1", "title": "Build login page",
+      "status": "TODO", "priority": "HIGH", "labels": ["frontend"],
+      "assignee": { "id": "...", "name": "Alice", "email": "alice@acme.com" },
+      "reporter": { "id": "...", "name": "Alice", "email": "alice@acme.com" },
+      "dueDate": null, "estimatedHours": null, "taskOrder": 0,
+      "createdAt": "2026-05-17T22:57:11Z"
+    }
+  }
+}
+```
+
+### `GET /api/projects/:id/tasks` 🔒
+List tasks with optional filters.
+
+**Query params:** `status?`, `priority?`, `assigneeId?`, `label?`
+
+**Response**
+```json
+{ "data": { "tasks": [ ...taskObjects ], "total": 5 } }
+```
+
+### `GET /api/projects/:id/tasks/board` 🔒
+Return all tasks grouped by status column, with per-column counts.
+
+**Response**
+```json
+{
+  "data": {
+    "board": {
+      "TODO":        [{ "taskKey": "SHOP-1", "title": "...", "priority": "LOW", ... }],
+      "IN_PROGRESS": [{ "taskKey": "SHOP-2", ... }],
+      "IN_REVIEW":   [],
+      "DONE":        [],
+      "CANCELLED":   []
+    },
+    "columnCounts": { "TODO": 1, "IN_PROGRESS": 1, "IN_REVIEW": 0, "DONE": 0, "CANCELLED": 0 }
+  }
+}
+```
+
+### `GET /api/tasks/:id` 🔒
+Full task detail including comments, sub-tasks, and the last 20 activity log entries.
+
+**Response**
+```json
+{
+  "data": {
+    "task": {
+      "taskKey": "SHOP-1", "title": "Build login page", "status": "IN_REVIEW",
+      "subTasks": [],
+      "comments": [],
+      "activities": [
+        { "type": "STATUS_CHANGE", "field": "status", "oldValue": "TODO", "newValue": "IN_REVIEW",
+          "actor": { "id": "...", "name": "Alice" }, "createdAt": "..." },
+        { "type": "FIELD_CHANGE",  "field": "priority", "oldValue": "HIGH", "newValue": "URGENT",
+          "actor": { "id": "...", "name": "Alice" }, "createdAt": "..." }
+      ]
+    }
+  }
+}
+```
+
+### `PATCH /api/tasks/:id` 🔒
+Update task fields. Each changed field is logged as a `FIELD_CHANGE` activity.
+
+**Body:** `title?`, `description?`, `priority?`, `assigneeId?`, `dueDate?`, `estimatedHours?`, `labels?`, `taskOrder?`
+
+### `PATCH /api/tasks/:id/status` 🔒
+Transition task status. Logs a `STATUS_CHANGE` entry in the activity history. Returns `400` if the status is unchanged.
+
+**Body:** `status`
+
+**Response**
+```json
+{ "data": { "task": { "taskKey": "SHOP-1", "status": "IN_PROGRESS", ... } } }
+```
+
+### `DELETE /api/tasks/:id` 🔒
+Soft-delete a task (`isDeleted: true`). Deleted tasks are excluded from all listings and the board view.
+
+---
+
+## Error Format
+
+All errors follow a consistent shape:
 
 ```json
 {
-  "sub":        "user-uuid",
-  "tenantId":   "tenant-uuid",
-  "tenantSlug": "acme-corp",
-  "role":       "MEMBER",
-  "email":      "user@example.com",
-  "name":       "Jane Doe",
-  "type":       "access",
-  "jti":        "unique-per-token-uuid",
-  "iat":        1234567890,
-  "exp":        1234568790
-}
-```
-
-> Use these claims to drive your UI without extra API calls — show the user's name, guard routes by `role`, scope requests by `tenantId`.
-
----
-
-## Frontend SDK (Vanilla JS / TypeScript)
-
-Drop this into your project as `api.js` or `api.ts`. It handles token storage, automatic refresh, and error normalisation.
-
-```typescript
-// api.ts
-
-const BASE = 'http://localhost:3000/api';
-
-// ── Token storage (localStorage — swap for httpOnly cookies in production) ──
-const Tokens = {
-  get access()   { return localStorage.getItem('accessToken') ?? ''; },
-  get refresh()  { return localStorage.getItem('refreshToken') ?? ''; },
-  set(access: string, refresh: string) {
-    localStorage.setItem('accessToken', access);
-    localStorage.setItem('refreshToken', refresh);
-  },
-  clear() {
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
-  },
-};
-
-// ── Decode JWT claims without a library ──────────────────────────────────────
-export function decodeToken(token: string): Record<string, unknown> {
-  try {
-    const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(base64));
-  } catch {
-    return {};
+  "success": false,
+  "error": {
+    "code": 404,
+    "message": "Task not found"
   }
 }
-
-export function getCurrentUser() {
-  return decodeToken(Tokens.access) as {
-    sub: string;
-    tenantId: string;
-    tenantSlug: string;
-    role: 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
-    email: string;
-    name: string;
-    exp: number;
-  };
-}
-
-// ── Core fetch wrapper with auto-refresh ─────────────────────────────────────
-async function request<T>(
-  path: string,
-  options: RequestInit = {},
-  retry = true,
-): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${Tokens.access}`,
-      ...options.headers,
-    },
-  });
-
-  const json = await res.json();
-
-  // Auto-refresh on 401
-  if (res.status === 401 && retry && Tokens.refresh) {
-    const refreshed = await fetch(`${BASE}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken: Tokens.refresh }),
-    }).then(r => r.json());
-
-    if (refreshed.success) {
-      Tokens.set(refreshed.data.accessToken, refreshed.data.refreshToken);
-      return request<T>(path, options, false); // retry once
-    }
-
-    // Refresh failed — user must log in again
-    Tokens.clear();
-    window.location.href = '/login';
-    throw new Error('Session expired');
-  }
-
-  if (!json.success) throw new Error(json.error?.message ?? 'Request failed');
-  return json.data as T;
-}
-
-const get  = <T>(path: string) => request<T>(path);
-const post = <T>(path: string, body: unknown) =>
-  request<T>(path, { method: 'POST', body: JSON.stringify(body) });
-const patch = <T>(path: string, body: unknown) =>
-  request<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
-const del  = <T>(path: string) => request<T>(path, { method: 'DELETE' });
-
-// ── Auth ─────────────────────────────────────────────────────────────────────
-export const auth = {
-  registerTenant: (body: {
-    tenantName: string; adminName: string;
-    adminEmail: string; adminPassword: string; timezone?: string;
-  }) => post<{ tenant: object; admin: object; tokens: { accessToken: string; refreshToken: string } }>('/tenants/register', body)
-    .then(data => { Tokens.set((data as any).tokens.accessToken, (data as any).tokens.refreshToken); return data; }),
-
-  register: (body: { tenantSlug: string; email: string; password: string; name: string }) =>
-    post<{ user: object; tokens: { accessToken: string; refreshToken: string } }>('/auth/register', body)
-      .then(data => { Tokens.set((data as any).tokens.accessToken, (data as any).tokens.refreshToken); return data; }),
-
-  login: (body: { email: string; password: string; tenantSlug: string }) =>
-    post<{ accessToken: string; refreshToken: string; user: object }>('/auth/login', body)
-      .then(data => { Tokens.set(data.accessToken, data.refreshToken); return data; }),
-
-  me:             () => get('/auth/me'),
-  logout:         () => post('/auth/logout', { refreshToken: Tokens.refresh }).finally(() => Tokens.clear()),
-  logoutAll:      () => post('/auth/logout-all', {}).finally(() => Tokens.clear()),
-  forgotPassword: (email: string, tenantSlug: string) => post('/auth/forgot-password', { email, tenantSlug }),
-  resetPassword:  (token: string, newPassword: string) => post('/auth/reset-password', { token, newPassword }),
-  changePassword: (currentPassword: string, newPassword: string) =>
-    post('/auth/change-password', { currentPassword, newPassword }),
-};
-
-// ── Users ─────────────────────────────────────────────────────────────────────
-export const users = {
-  list:         () => get<{ users: object[]; total: number }>('/users'),
-  invite:       (email: string, role = 'MEMBER') => post('/users/invite', { email, role }),
-  acceptInvite: (token: string, name: string, password: string) =>
-    post<{ user: object; tokens: { accessToken: string; refreshToken: string } }>('/users/accept-invite', { token, name, password })
-      .then(data => { Tokens.set((data as any).tokens.accessToken, (data as any).tokens.refreshToken); return data; }),
-  changeRole:   (userId: string, role: string) => patch(`/users/${userId}/role`, { role }),
-  deactivate:   (userId: string) => del(`/users/${userId}`),
-};
-
-// ── Projects ──────────────────────────────────────────────────────────────────
-export const projects = {
-  create:        (body: { name: string; key: string; description?: string }) => post('/projects', body),
-  list:          () => get<{ projects: object[]; total: number }>('/projects'),
-  get:           (id: string) => get(`/projects/${id}`),
-  update:        (id: string, body: { name?: string; description?: string; isArchived?: boolean }) => patch(`/projects/${id}`, body),
-  archive:       (id: string) => del(`/projects/${id}`),
-  listMembers:   (id: string) => get(`/projects/${id}/members`),
-  addMember:     (id: string, userId: string, role = 'MEMBER') => post(`/projects/${id}/members`, { userId, role }),
-  removeMember:  (id: string, userId: string) => del(`/projects/${id}/members/${userId}`),
-};
 ```
+
+| Code | Meaning |
+|------|---------|
+| `400` | Validation error / bad request |
+| `401` | Missing or invalid token |
+| `403` | Insufficient role |
+| `404` | Resource not found |
+| `409` | Conflict (duplicate email, key, etc.) |
+| `500` | Internal server error |
 
 ---
 
-## Integration Recipes
+## RBAC Quick Reference
 
-### 1. Login flow
+| Role | Invite | Manage Users | Create Project | Manage Members | Create Task | View |
+|------|--------|-------------|----------------|----------------|-------------|------|
+| OWNER  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| ADMIN  | ✅ (MEMBER/VIEWER only) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| MEMBER | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| VIEWER | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
-```typescript
-try {
-  await auth.login({ email, password, tenantSlug });
-  const user = getCurrentUser(); // decoded from token, no API call
-  console.log(`Welcome ${user.name}, role: ${user.role}`);
-  window.location.href = '/dashboard';
-} catch (e) {
-  showError(e.message); // 'Invalid credentials'
+---
+
+## JWT Payload
+
+The access token contains everything the frontend needs to drive UI state without extra API calls:
+
+```json
+{
+  "sub": "<userId>",
+  "tenantId": "<tenantId>",
+  "tenantSlug": "acme-inc",
+  "role": "OWNER",
+  "email": "alice@acme.com",
+  "name": "Alice"
 }
 ```
 
-### 2. Register new workspace
-
-```typescript
-await auth.registerTenant({
-  tenantName: 'Acme Corp',
-  adminName: 'Alice',
-  adminEmail: 'alice@acme.com',
-  adminPassword: 'Password123!',
-  timezone: 'America/New_York',
-});
-// Tokens stored automatically — user is logged in
-```
-
-### 3. Guard routes by role
-
-```typescript
-const user = getCurrentUser();
-
-// Only render admin UI if role allows it
-const canManage = ['OWNER', 'ADMIN'].includes(user.role);
-
-if (!canManage) {
-  return renderError('You do not have permission to view this page.');
-}
-```
-
-### 4. Invite a teammate
-
-```typescript
-// Admin invites someone — they get an email with a link containing the token
-await users.invite('newcolleague@company.com', 'MEMBER');
-
-// Teammate visits the invite link and accepts:
-await users.acceptInvite(tokenFromUrl, 'Their Name', 'TheirPassword!');
-// They are now logged in automatically
-```
-
-### 5. Load projects dashboard
-
-```typescript
-const { projects: list } = await projects.list();
-
-list.forEach(p => {
-  console.log(`${p.key} — ${p.name} | ${p._count.members} members, ${p._count.tasks} tasks`);
-});
-```
-
-### 6. Create a project
-
-```typescript
-const { project } = await projects.create({
-  name: 'Mobile App',
-  key: 'MOB',          // becomes 'MOB', unique per workspace
-  description: 'iOS and Android app',
-});
-```
-
-### 7. Forgot password flow
-
-```typescript
-// Step 1 — user submits their email
-await auth.forgotPassword('user@company.com', 'acme-corp');
-// They receive an email with a reset link: /reset-password?token=abc123
-
-// Step 2 — user visits the link and submits new password
-const token = new URLSearchParams(window.location.search).get('token');
-await auth.resetPassword(token, 'NewSecurePassword!');
-// All old sessions are revoked. Redirect to login.
-```
-
----
-
-## Error Codes Reference
-
-| Code | Meaning | Common cause |
-|---|---|---|
-| `400` | Bad request | Validation failed, same password on change, expired token |
-| `401` | Unauthorized | Missing/expired access token, wrong password |
-| `403` | Forbidden | Role not permitted (e.g. MEMBER hitting admin route) |
-| `404` | Not found | Wrong ID, wrong tenant slug |
-| `409` | Conflict | Duplicate email in tenant, duplicate project key |
-| `429` | Rate limited | Too many auth requests (production only) |
-| `500` | Server error | Unexpected — report to backend team |
-
----
-
-## Tenant Isolation — Important
-
-Every user belongs to exactly one tenant. The `tenantSlug` (e.g. `acme-corp`) identifies the workspace and is **required on login**. The same email address can exist in multiple tenants independently — they are completely separate accounts.
-
-> **For frontend routing:** store the `tenantSlug` from the JWT and include it in your login form. A common pattern is to use a subdomain (`acme-corp.yourapp.com`) or a URL path (`/workspaces/acme-corp/login`).
-
----
-
-## Running Locally
-
-```bash
-# 1. Copy env
-cp .env.example .env   # fill in your DATABASE_URL + secrets
-
-# 2. Start DB (Docker)
-docker-compose up -d
-
-# 3. Run migrations
-npm run db:migrate
-
-# 4. Start dev server (auto-restarts on changes)
-npm run dev
-
-# 5. Run the full test suite
-bash scripts/e2e-test.sh
-```
-
-Server runs on **http://localhost:3000**. Rate limiting is disabled in `development` mode.
+Access tokens expire in **15 minutes**. Refresh tokens expire in **7 days**.
